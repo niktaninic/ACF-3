@@ -428,7 +428,7 @@ if SERVER then
 	hook.Add("ACF_OnLoadPersistedData", "ACF Workshop Content", function()
 		if ACF.ServerData.WorkshopContent then
 			resource.AddWorkshop("2183798463") -- Playermodel Seats
-			resource.AddWorkshop("3248769144") -- ACF-3 Base
+			resource.AddWorkshop("3780350801") -- ACF-3 Base
 		end
 
 		if ACF.ServerData.WorkshopExtras then
