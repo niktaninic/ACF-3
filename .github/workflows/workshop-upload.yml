@@ -4,16 +4,18 @@ on:
   push:
     branches:
       - master
+      - dev # Warto dodać dev, jeśli publikujesz ze swojej gałęzi deweloperskiej
   workflow_dispatch:
 
 jobs:
   deploy:
-    if: github.repository == 'ACF-Team/ACF-3'
+    # Zmień 'niktaninic/ACF-3' na pełną nazwę swojego repozytorium na GitHubie
+    if: github.repository == 'niktaninic/ACF-3'
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           path: project
 
@@ -24,9 +26,11 @@ jobs:
           echo "${{ github.sha }}" > ${{ github.workspace }}/project/data_static/acf/acf-3-version.txt
 
       - name: Upload to Workshop
-        uses: CFC-Servers/gmod-upload@master
+        uses: CFC-Servers/gmod-upload@v1
         with:
-          id: 3248769144
+          id: 3780350801
+          path: project
+          icon: icon_512.jpg # Upewnij się, że plik icon_512.jpg znajduje się w głównym katalogu repo
           changelog: "${{ github.event.head_commit.message }}"
           title: "[ACF-3] Armored Combat Framework"
           type: "tool"
@@ -36,3 +40,4 @@ jobs:
         env:
           STEAM_USERNAME: ${{ secrets.ACF_STEAM_ACCOUNT }}
           STEAM_PASSWORD: ${{ secrets.ACF_STEAM_PASSWORD }}
+          STEAM_AUTH_CODE: ${{ secrets.ACF_STEAM_2FA }} # Opcjonalnie: jeśli masz włączony Steam Guard / 2FA
