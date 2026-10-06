@@ -1,35 +1,38 @@
-local Guidances = ACF.Classes.Guidances
-local Guidance  = Guidances.Register("Wire (SACLOS)", "Wire (MCLOS)")
-
-if CLIENT then
-	Guidance.Description = "This guidance package allows you to control the direction of the missile using a computer's aiming position."
-else
-	local ZERO = Vector()
-
-	function Guidance:GetCost()
-		return 3
+local Classes = ACF.Classes
+Classes.DefineClass("ACF.Missiles.Guidance.WireSACLOS", "ACF.Missiles.Guidance.WireMCLOS", function(CLASS)
+	CLASS.Name = "Wire (SACLOS)"
+	-- Shared so the ammo menu can price missile rounds clientside.
+	function CLASS:GetCost()
+		return 5
 	end
 
-	function Guidance:CheckComputer()
-		local Computer = self:GetComputer()
+	if CLIENT then
+		CLASS.Description = "This guidance package allows you to control the direction of the missile using a computer's aiming position."
+	else
+		local ZERO = Vector()
 
-		if not Computer then return end
-		if not Computer.IsComputer then return end
-		if Computer.HitPos == ZERO then return end
 
-		return Computer.HitPos
-	end
+		function CLASS:CheckComputer()
+			local Computer = self:GetComputer()
 
-	function Guidance:GetGuidance(Missile)
-		if self.WireSnapped then return {} end
-		if not self:OnRange(Missile) then
-			self:SnapRope(Missile)
+			if not Computer then return end
+			if not Computer.IsComputer then return end
+			if Computer.HitPos == ZERO then return end
 
-			return {}
+			return Computer.HitPos
 		end
 
-		local HitPos = self:CheckComputer()
+		function CLASS:GetGuidance(Missile)
+			if self.WireSnapped then return {} end
+			if not self:OnRange(Missile) then
+				self:SnapRope(Missile)
 
-		return { TargetPos = HitPos }
+				return {}
+			end
+
+			local HitPos = self:CheckComputer()
+
+			return { TargetPos = HitPos }
+		end
 	end
-end
+end)

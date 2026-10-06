@@ -59,6 +59,12 @@ local function OnActiveChanged(Controller, Ply, Active)
 	net.Start("ACF_Controller_CamInfo")
 	net.WriteTable(Controller.Filter or {})
 	net.Send(Ply)
+
+	if Active then
+		Controller:FLIR_OnEnter(Ply)
+	else
+		Controller:FLIR_OnExit(Ply)
+	end
 end
 
 local function OnKeyChanged(Controller, Key, Down)
@@ -89,7 +95,7 @@ local function OnButtonChanged(Controller, Button, Down)
 		Controller.TurretComputer.Inputs.Position.Value = Controller.HitPos
 		Controller.TurretComputer:TriggerInput("Calculate Superelevation", 1)
 
-		local Diff = (Controller.Primary:GetPos() - Controller.HitPos)
+		local Diff = (Controller:GetGun1():GetPos() - Controller.HitPos)
 		Controller.LasePitch = math.deg(math.asin(Diff.z / Diff:Length()))
 		Controller.LaseDist = Diff:Length()
 	end
@@ -120,6 +126,13 @@ local function OnLinkedSeat(Controller, Target)
 		if not IsValid(Controller) or not IsValid(Target) then return end
 		if Ply ~= Controller.Driver then return end
 		OnButtonChanged(Controller, Key, true)
+
+		-- PlayerButtonDown doesn't fire client side in singleplayer, so the server forwards it there
+		if game.SinglePlayer() then
+			net.Start("ACF_Controller_Button")
+			net.WriteUInt(Key, 8)
+			net.Send(Ply)
+		end
 	end)
 
 	hook.Add("PlayerButtonUp", "ACFControllerSeatButtonUp" .. Controller:EntIndex(), function(Ply, Key)
@@ -134,6 +147,8 @@ local function OnLinkedSeat(Controller, Target)
 		hook.Remove("PlayerLeaveVehicle", "ACFControllerSeatExit" .. Ent:EntIndex())
 		hook.Remove("KeyPress", "ACFControllerSeatKeyPress" .. Ent:EntIndex())
 		hook.Remove("KeyRelease", "ACFControllerSeatKeyRelease" .. Ent:EntIndex())
+		hook.Remove("PlayerButtonDown", "ACFControllerSeatButtonDown" .. Ent:EntIndex())
+		hook.Remove("PlayerButtonUp", "ACFControllerSeatButtonUp" .. Ent:EntIndex())
 	end)
 end
 

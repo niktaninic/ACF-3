@@ -9,7 +9,6 @@ local function Init(Entity)
 	Entity.GearboxIntermediates = {}   -- Or otherwise
 	Entity.Wheels               = {}   -- Wheels
 	Entity.Engines              = {}   -- Engines
-	Entity.Fuels                = {}   -- Fuel tanks
 	Entity.LeftGearboxes        = {}   -- Gearboxes connected to the left drive wheel
 	Entity.RightGearboxes       = {}   -- Gearboxes connected to the right drive wheel
 	Entity.LeftWheels           = {}   -- Wheels connected to the left drive wheel
@@ -22,7 +21,6 @@ local function Init(Entity)
 	Entity.SteerPlatesSorted    = {}   -- Steer plates sorted by their position
 	Entity.SteerPhysicsObjects  = {}   -- Steering physics objects
 	Entity.SteerAngles          = {}   -- Steering angles for the wheels
-	Entity.FuelCapacity         = 0    -- Total fuel capacity of the vehicle
 	Entity.GearboxEndCount      = 1    -- Number of endpoint gearboxes
 	Entity.Speed                = 0
 end
@@ -34,14 +32,14 @@ do
 
 	--- Finds the components of the drive train
 	--- Input is the "main" gearbox of the drivetrain
-	--- returns multiple arrays, one for Wheels, engines, fuels, wheel gearboxes and intermediate gearboxes
+	--- returns multiple arrays, one for Wheels, engines, wheel gearboxes and intermediate gearboxes
 	--- This should be enough for general use, obviously it can't cover every edge case.
 	local function DiscoverDriveTrain(Target)
 		local Queued  = { [Target] = true }
 		local Checked = {}
 		local Current, Class, Sources
 
-		local Wheels, Engines, Fuels, Ends, Intermediates = {}, {}, {}, {}, {}
+		local Wheels, Engines, Ends, Intermediates = {}, {}, {}, {}
 
 		while next(Queued) do
 			Current = next(Queued)
@@ -55,13 +53,13 @@ do
 				Engines[Current] = true
 			elseif Class == "acf_gearbox" then
 				if Sources.Wheels and next(Sources.Wheels(Current)) then Ends[Current] = true else Intermediates[Current] = true end
-			elseif Class == "acf_fueltank" then
-				Fuels[Current] = true
 			elseif Class == "prop_physics" then
 				Wheels[Current] = true
 			end
 
-			for _, Action in pairs(Sources) do
+			for Name, Action in pairs(Sources) do
+				if Name == "FuelTanks" then continue end -- Shared tanks would pull in unrelated engines on the same parent
+
 				for Entity in pairs(Action(Current)) do
 					if not (Checked[Entity] or Queued[Entity]) then
 						Queued[Entity] = true
@@ -69,7 +67,7 @@ do
 				end
 			end
 		end
-		return Wheels, Engines, Fuels, Ends, Intermediates
+		return Wheels, Engines, Ends, Intermediates
 	end
 
 	--- Finds the "side" of the gearbox that the wheel is connected to. This corresponds to the wire inputs.
@@ -98,6 +96,7 @@ do
 	-- Sets an input for an entity, if it exists and the value has changed since last time.
 	local function TriggerSafe(SelfTbl, Entity, Name, Value)
 		if not IsValid(Entity) then return end
+		if not SelfTbl.LastInputs then SelfTbl.LastInputs = {} end
 		if not SelfTbl.LastInputs[Entity] then SelfTbl.LastInputs[Entity] = {} end
 		if SelfTbl.LastInputs[Entity][Name] ~= Value then
 			SelfTbl.LastInputs[Entity][Name] = Value
@@ -124,6 +123,18 @@ do
 		for Gearbox, Side in pairs(SelfTbl.RightGearboxes) do TriggerSafe(SelfTbl, Gearbox, (NotSided and "" or Side .. " ") .. Name, Value) end
 	end
 
+	-- Locks or releases the brake on both sides. When locking, also blocks the clutches and engages the weld latches
+	local function SetParkingBrake(SelfTbl, State, BrakeStrength)
+		BrakeStrength = State and BrakeStrength or 0
+		SetLeft(SelfTbl, "Brake", BrakeStrength) SetRight(SelfTbl, "Brake", BrakeStrength)
+		SetLeft(SelfTbl, "Brake", BrakeStrength, true) SetRight(SelfTbl, "Brake", BrakeStrength, true) -- Differentials HAVE TO BE DIFFERENT
+
+		if State then
+			SetLeft(SelfTbl, "Clutch", CLUTCH_BLOCK) SetRight(SelfTbl, "Clutch", CLUTCH_BLOCK)
+			SetLatches(SelfTbl, true)
+		end
+	end
+
 	--- Steer a plate left or right
 	local function SetSteerPlate(SelfTbl, BasePlate, SteerPlate, TURN_ANGLE, TURN_RATE)
 		local TURN = SelfTbl.SteerAngles[SteerPlate] or 0
@@ -140,11 +151,14 @@ do
 		-- Need a list of all linked wheels
 		if not IsValid(MainGearbox) then return end
 
+		local baseplate = self.Baseplate
+		if not baseplate then return end
+
 		-- Recalculate the drive train components
-		self.Wheels, self.Engines, self.Fuels, self.GearboxEnds, self.GearboxIntermediates = DiscoverDriveTrain(MainGearbox)
+		self.Wheels, self.Engines, self.GearboxEnds, self.GearboxIntermediates = DiscoverDriveTrain(MainGearbox)
 
 		self.GearboxEndCount = table.Count(self.GearboxEnds)
-		-- PrintTable({Wheels = self.Wheels, Engines = self.Engines, Fuels = self.Fuels, GearboxEnds = self.GearboxEnds, GearboxIntermediates = self.GearboxIntermediates})
+		-- PrintTable({Wheels = self.Wheels, Engines = self.Engines, GearboxEnds = self.GearboxEnds, GearboxIntermediates = self.GearboxIntermediates})
 
 		-- Process gears
 		local ForwardGears = {}
@@ -154,7 +168,7 @@ do
 		end
 		table.sort(ForwardGears, function(A, B) return MainGearbox.Gears[A] < MainGearbox.Gears[B] end)
 		table.sort(ReverseGears, function(A, B) return MainGearbox.Gears[A] > MainGearbox.Gears[B] end)
-		if not MainGearbox.GearboxLegacyRatio then
+		if MainGearbox.GearboxLegacyRatio then
 			ForwardGears = table.Reverse(ForwardGears)
 			ReverseGears = table.Reverse(ReverseGears)
 		end
@@ -162,19 +176,16 @@ do
 		self.ForwardGears, self.ReverseGears = ForwardGears, ReverseGears
 		if MainGearbox.Automatic then self.ForwardGears = {1} self.ReverseGears = {2} end
 
-		self.FuelCapacity = 0
-		for Fuel in pairs(self.Fuels) do self.FuelCapacity = self.FuelCapacity + Fuel.Capacity end
-
 		-- Determine the Left/Right wheels assuming the vehicle is built north
 		local LeftWheels, RightWheels = {}, {}
 		local avg, count = 0, 0
 		for Wheel in pairs(self.Wheels) do
-			avg, count = avg + self.Baseplate:WorldToLocal(Wheel:GetPos()).y, count + 1
+			avg, count = avg + baseplate:WorldToLocal(Wheel:GetPos()).y, count + 1
 		end
 		avg = avg / count
 
 		for Wheel in pairs(self.Wheels) do
-			if self.Baseplate:WorldToLocal(Wheel:GetPos()).y > avg then LeftWheels[Wheel] = true else RightWheels[Wheel] = true end
+			if baseplate:WorldToLocal(Wheel:GetPos()).y > avg then LeftWheels[Wheel] = true else RightWheels[Wheel] = true end
 		end
 		self.LeftWheels, self.RightWheels = LeftWheels, RightWheels
 
@@ -199,7 +210,7 @@ do
 		end
 
 		table.sort(self.SteerPlatesSorted, function(A, B)
-			return self.Baseplate:WorldToLocal(A:GetPos()).x > self.Baseplate:WorldToLocal(B:GetPos()).x
+			return baseplate:WorldToLocal(A:GetPos()).x > baseplate:WorldToLocal(B:GetPos()).x
 		end)
 
 		self.CanSteer = #self.SteerPlatesSorted > 0 -- Steer if there are any steer plates
@@ -223,6 +234,13 @@ do
 		self.LastInputs = {}
 		self.LastGear = 0
 		self.LastTrueGear = 0
+	end
+
+	--- Applies or releases the wire parking brake, and toggles mobility control accordingly
+	function ENT:SetWireParkingBrake(SelfTbl, State)
+		self:SetDisableMobility(State)
+		SetParkingBrake(SelfTbl, State, self:GetBrakeStrengthTop())
+		if not State then SetLatches(SelfTbl, false) end
 	end
 
 	--- Handles driving, gearing, clutches, latches and brakes
@@ -264,10 +282,7 @@ do
 		end
 
 		if IsBraking or (self:GetBrakeEngagement() == 1 and not IsMoving) then -- Braking
-			SetLeft(SelfTbl, "Brake", BrakeStrength) SetRight(SelfTbl, "Brake", BrakeStrength)
-			SetLeft(SelfTbl, "Brake", BrakeStrength, true) SetRight(SelfTbl, "Brake", BrakeStrength, true) -- Differentials HAVE TO BE DIFFERENT
-			SetLeft(SelfTbl, "Clutch", CLUTCH_BLOCK) SetRight(SelfTbl, "Clutch", CLUTCH_BLOCK)
-			SetLatches(SelfTbl, true)
+			SetParkingBrake(SelfTbl, true, BrakeStrength)
 			return
 		end
 
@@ -291,8 +306,7 @@ do
 			end
 		else
 			-- Car steering
-			SetLeft(SelfTbl, "Brake", 0) SetRight(SelfTbl, "Brake", 0)
-			SetLeft(SelfTbl, "Brake", 0, true) SetRight(SelfTbl, "Brake", 0, true)
+			SetParkingBrake(SelfTbl, false)
 			SetLeft(SelfTbl, "Clutch", CLUTCH_FLOW) SetRight(SelfTbl, "Clutch", CLUTCH_FLOW)
 			SetLatches(SelfTbl, false) -- Revert braking if not braking
 
@@ -300,7 +314,16 @@ do
 			SetBoth(SelfTbl, "Gear", TransferGear)
 
 			-- Setang steering stuff
-			local TURN_ANGLE = A and BrakeStrength or D and -BrakeStrength or 0
+			local SteerLow, SteerTop = self:GetSteerLow(), self:GetSteerTop()
+			local SteerStrength = BrakeStrength
+			if SteerLow ~= 0 or SteerTop ~= 0 then
+				SteerStrength = SteerLow
+				if MinSpeed ~= MaxSpeed then
+					SteerStrength = math.Remap(Speed, MinSpeed, MaxSpeed, SteerLow, SteerTop)
+				end
+			end
+
+			local TURN_ANGLE = A and SteerStrength or D and -SteerStrength or 0
 			local TURN_RATE = self:GetSteerRate() or 0
 			local SteerPercents = {self:GetSteerPercent1(), self:GetSteerPercent2(), self:GetSteerPercent3(), self:GetSteerPercent4()}
 			for Index, SteerPlate in ipairs(SelfTbl.SteerPlatesSorted) do

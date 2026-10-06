@@ -1,20 +1,23 @@
-local Fuzes = ACF.Classes.Fuzes
-local Fuze  = Fuzes.Register("Radio", "Optical")
-
-if CLIENT then
-	Fuze.Description = "This fuze tracks the Guidance module's target and detonates when the distance becomes low enough.\nDistance in inches."
-else
-	function Fuze:GetCost()
+local Classes = ACF.Classes
+Classes.DefineClass("ACF.Missiles.Fuze.Radio", "ACF.Missiles.Fuze.Optical", function(CLASS)
+	CLASS.Name = "Radio"
+	-- Shared so the ammo menu can price missile rounds clientside.
+	function CLASS:GetCost()
 		return 1
 	end
 
-	function Fuze:GetDetonate(Missile, Guidance)
-		if not self:IsArmed() then return false end
+	if CLIENT then
+		CLASS.Description = "This fuze tracks the Guidance module's target and detonates when the distance becomes low enough.\nDistance in inches."
+	else
 
-		local Target = Guidance.TargetPos or Guidance:GetGuidance(Missile).TargetPos
+		function CLASS:GetDetonate(Missile, Guidance)
+			if not self:IsArmed() then return false end
 
-		if not Target then return false end
+			local Target = Guidance.TargetPos or Guidance:GetGuidance(Missile).TargetPos
 
-		return Missile.ACF_Position:Distance(Target) <= self.Distance
+			if not Target then return false end
+
+			return Missile.ACF_Position:Distance(Target) <= self.Distance
+		end
 	end
-end
+end)
