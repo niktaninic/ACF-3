@@ -86,6 +86,14 @@ do -- Updating
 		self.DamageScale = (Health and MaxHealth) and math.max((Health / (MaxHealth * 0.75)) - 0.25 / 0.75, 0) or 1
 
 		Contraption.SetMass(self, Class.Mass)
+
+		self:UpdateLinkHints()
+	end
+
+	-- Lightweight controllers link to a turret and remote ones to a crew member, so only the hint for this kind can apply
+	function ENT:UpdateLinkHints()
+		ACF.Hints.Set(self, "turret_controller_no_turret", not self.IsRemote and not IsValid(self.Turret))
+		ACF.Hints.Set(self, "turret_controller_no_crew", self.IsRemote and not IsValid(self.Crew))
 	end
 end
 
@@ -101,20 +109,20 @@ do	-- Metamethods
 			if self.Active then
 				State:AddKeyValue("Status", "Active")
 			else
-				State:AddError("Inactive: " .. self.InactiveReason)
+				State:AddError("Inactive")
 			end
 		end
 	end
 
 	do	-- ACF Funcs
 		function ENT:Enable()
-			self:SetActive(true, "")
+			self:SetActive(true)
 			self:UpdateOverlay()
 		end
 
 		function ENT:Disable()
 			self.Active	= false
-			self:SetActive(false, "")
+			self:SetActive(false)
 			self:UpdateOverlay()
 		end
 
@@ -126,17 +134,31 @@ do	-- Metamethods
 			self.DamageScale = math.max((self.ACF.Health / (self.ACF.MaxHealth * 0.75)) - 0.25 / 0.75, 0)
 		end
 
-		function ENT:SetActive(Active, Reason)
-			local Trigger = (self.Active ~= Active) or (self.InactiveReason ~= Reason)
-			if not Active then
-				self.InactiveReason = Reason
-				self.Active = false
-			else
-				self.InactiveReason = ""
-				self.Active = true
+		function ENT:SetActive(Active)
+			if self.Active == Active then return end
+
+			self.Active = Active
+
+			self:UpdateOverlay(true)
+		end
+
+		function ENT:ACF_ShowRequirements()
+			return IsValid(self.IsRemote and self.Crew or self.Turret)
+		end
+
+		-- Highest caliber among the weapons on a turret and any sub-turrets it carries
+		local function GetTurretMaxCaliber(Turret)
+			local Caliber = 0
+
+			for Weapon in pairs(Turret.DirectWeapons or {}) do
+				if IsValid(Weapon) then Caliber = math.max(Caliber, Weapon.Caliber or 0) end
 			end
 
-			if Trigger then self:UpdateOverlay(true) end
+			for SubTurret in pairs(Turret.SubTurrets or {}) do
+				if IsValid(SubTurret) then Caliber = math.max(Caliber, GetTurretMaxCaliber(SubTurret)) end
+			end
+
+			return Caliber
 		end
 
 		-- Whether this controller is currently providing its benefit
@@ -144,24 +166,34 @@ do	-- Metamethods
 			if self.Disabled then return false end
 
 			local Linked = self.IsRemote and self.Crew or self.Turret
-			if not IsValid(Linked) then self:SetActive(false, "") return false end
+			if not IsValid(Linked) then self:SetActive(false) return false end
 
-			if (self.ACF.Health / self.ACF.MaxHealth) <= 0.25 then
-				self:SetActive(false, "Too damaged!")
+			local Percent = self.ACF.Health / self.ACF.MaxHealth * 100
+			local Healthy = self:SetRequirement("component_health", Percent > 25, { Percent = math.floor(Percent) })
+			local Light   = true
+
+			-- Overweight or over-caliber turrets keep the link but get no bonus, so both are rechecked
+			-- here every time rather than once at link time
+			if not self.IsRemote then
+				local CarriedMass = (Linked.TurretData and Linked.TurretData.TotalMass or 0) + (Linked.ACF and Linked.ACF.Mass or 0)
+
+				local MassOK = self:SetRequirement("turret_controller_mass", CarriedMass <= ACF.LightweightTurretMassLimit,
+					{ Mass = math.Round(CarriedMass), Limit = ACF.LightweightTurretMassLimit, Turret = Linked })
+
+				local MaxCaliber = GetTurretMaxCaliber(Linked)
+
+				local CaliberOK = self:SetRequirement("turret_controller_caliber", MaxCaliber <= ACF.LightweightTurretCaliberLimit,
+					{ Caliber = MaxCaliber, Limit = ACF.LightweightTurretCaliberLimit, Turret = Linked })
+
+				Light = MassOK and CaliberOK
+			end
+
+			if not (Healthy and Light) then
+				self:SetActive(false)
 				return false
 			end
 
-			-- Overweight turrets keep the link but get no bonus, so the mass is rechecked here
-			-- every time rather than once at link time
-			if not self.IsRemote then
-				local CarriedMass = (Linked.TurretData and Linked.TurretData.TotalMass or 0) + (Linked.ACF and Linked.ACF.Mass or 0)
-				if CarriedMass > ACF.LightweightTurretMassLimit then
-					self:SetActive(false, "Turret is too heavy!")
-					return false
-				end
-			end
-
-			if self.Active == false then self:SetActive(true, "") end
+			if self.Active == false then self:SetActive(true) end
 			return true
 		end
 
@@ -229,12 +261,9 @@ do	-- Metamethods
 			if self.IsRemote and IsValid(self.Crew) then
 				duplicator.StoreEntityModifier(self, "ACFCrew", {self.Crew:EntIndex()})
 			end
-
-			-- Wire dupe info
-			self.BaseClass.PreEntityCopy(self)
 		end
 
-		function ENT:PostEntityPaste(Player, Ent, CreatedEntities)
+		function ENT:PostEntityPaste(_, Ent, CreatedEntities)
 			local EntMods = Ent.EntityMods
 
 			if EntMods.ACFCrew then
@@ -242,8 +271,6 @@ do	-- Metamethods
 
 				EntMods.ACFCrew = nil
 			end
-
-			self.BaseClass.PostEntityPaste(self, Player, Ent, CreatedEntities)
 		end
 	end
 end
@@ -285,6 +312,7 @@ do	-- Lightweight Turret Controllers link to acf_turret directly, no crew involv
 		Turret.LightweightControllers = Turret.LightweightControllers or {}
 		Turret.LightweightControllers[This] = true
 
+		This:UpdateLinkHints()
 		This:UpdateOverlay(true)
 		Turret:UpdateOverlay()
 
@@ -298,6 +326,7 @@ do	-- Lightweight Turret Controllers link to acf_turret directly, no crew involv
 
 		if Turret.LightweightControllers then Turret.LightweightControllers[This] = nil end
 
+		This:UpdateLinkHints()
 		This:UpdateOverlay(true)
 		Turret:UpdateOverlay()
 
@@ -371,6 +400,7 @@ do	-- Remote Turret Controllers link to a Gunner-role crew member
 		This.Crew = Crew
 		Crew.RemoteController = This
 
+		This:UpdateLinkHints()
 		This:UpdateOverlay(true)
 		Crew:UpdateOverlay()
 
@@ -383,6 +413,7 @@ do	-- Remote Turret Controllers link to a Gunner-role crew member
 		This.Crew = nil
 		if Crew.RemoteController == This then Crew.RemoteController = nil end
 
+		This:UpdateLinkHints()
 		This:UpdateOverlay(true)
 		Crew:UpdateOverlay()
 

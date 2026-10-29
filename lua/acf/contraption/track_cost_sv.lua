@@ -66,9 +66,11 @@ end
 
 do	-- Actual registration for known things
 	do	-- Armor registration
-		local ArmorTypes = ACF.Classes.ArmorTypes
+		local Classes = ACF.Classes
 
-		CostSystem.RegisterBulkOperation("armor", false, function(entity)
+		local function GetArmorType(ID) return Classes.GetSubtypeByName("ACF.ArmorTypes.BaseArmorType", "ACF.ArmorTypes." .. tostring(ID)) end
+
+		CostSystem.RegisterBulkOperation("armor", false, function(entity, Breakdown)
 			local MeshData = entity.ACF_Volumetric_Mesh
 
 			if not MeshData then return 0 end -- Props with no armor mesh yet (or never) contribute no cost
@@ -76,9 +78,13 @@ do	-- Actual registration for known things
 			local Cost = 0
 
 			for _, Convex in ipairs(MeshData.Convexes) do
-				local ArmorType = ArmorTypes.Get(Convex.Material) or ArmorTypes.Get("Default")
+				local ArmorType = GetArmorType(Convex.Material) or GetArmorType("Default")
 
-				Cost = Cost + Convex.Volume * CubicInchToM3 * ArmorType.CostMul -- Convex.Volume is in^3, CostMul is points/m^3
+				local ConvexCost = Convex.Volume * CubicInchToM3 * ArmorType.CostMul -- Convex.Volume is in^3, CostMul is points/m^3
+				local TypeID     = "armor: " .. (Convex.Material or "Default")
+
+				Cost = Cost + ConvexCost
+				Breakdown[TypeID] = (Breakdown[TypeID] or 0) + ConvexCost
 			end
 
 			return Cost

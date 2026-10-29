@@ -139,9 +139,16 @@ do -- ACF global vars
 
 	ACF.BlastAreaCoef = 1 / 264.7 -- Multiplier used to scale HE blast area against an entity's surface area. Kept separate from the convex armor health coefficient.
 
-	ACF.DefineSetting("HealthCoef",           0.05,    "Health coefficient has been set to %.2f.", ACF.FloatDataCallback(0.01, 2, 2))
+	ACF.DefineSetting("HealthCoef",           1,       "Health coefficient has been set to %.2f.", ACF.FloatDataCallback(0.01, 2, 2))
 
-	ACF.DefineSetting("ArmorCoef",            1,      "Armor coefficient has been set to %.2f.", ACF.FloatDataCallback(0.01, 2, 2))
+	if SERVER then
+		-- Meant to be 1 by default. FCVAR_ARCHIVE and its consequences...
+		hook.Add("ACF_OnLoadPersistedData", "ACF HealthCoef Migration", function()
+			if ACF.GetServerData("HealthCoef") == 0.1 then ACF.SetServerData("HealthCoef", 1) end
+		end)
+	end
+
+	ACF.DefineSetting("ArmorCoef",           1,      "Armor coefficient has been set to %.2f.", ACF.FloatDataCallback(0.01, 2, 2))
 
 	ACF.DefineSetting("DamageCoef",           1,      "Damage coefficient has been set to %.2f.", ACF.FloatDataCallback(0.01, 1000, 2))
 
@@ -188,7 +195,10 @@ do -- ACF global vars
 	ACF.DefineSetting("KillLogMaxSessions",   20,    "Kill log max retained sessions has been set to %s.", ACF.FloatDataCallback(1, 500, 0))
 	ACF.DefineSetting("KillLogQueryCooldown", 10,    "Kill log query cooldown has been set to %s seconds.", ACF.FloatDataCallback(0, 120, 0))
 
-	ACF.IllegalDisableTime   = 30 -- Time in seconds for an entity to be disabled when it fails ACF.IsLegal
+	ACF.IllegalDisableTime   = 30 -- Time in seconds for an entity to be disabled when it fails a legality check
+	ACF.OverlapInset         = 0.5 -- Distance in units below a convex's surface that the overlap check ignores, so slight clipping is allowed
+	ACF.MutationGhostTime    = 30 -- Time in seconds that a chip-mutated non-ACF entity is ignored by ballistics and damage
+	ACF.MaxPenetrations      = 50 -- Convexes a bullet can cross in one pass, hitting it deletes every prop it crossed
 	ACF.Volume               = 1 -- Global volume for ACF sounds
 	ACF.MobilityLinkDistance = 650 -- Maximum distance, in inches, at which mobility-related components will remain linked with each other
 	ACF.LinkDistance         = 650 -- Maximum distance, in inches, at which components will remain linked with each other
@@ -233,6 +243,7 @@ do -- ACF global vars
 	ACF.BaseReload         = 1 -- Minimum reload time. Time it takes to move around a weightless projectile
 	ACF.MassToTime         = 0.15 -- Conversion of projectile mass to time to be moved around. Length and caliber are already accounted for in mass
 	ACF.TwoPieceCount      = 2 -- Pieces a two piece round is loaded as. Each is that fraction of the round's mass, and each costs its own loading motion
+	ACF.ArmorHealthScale   = 0.1 -- Fixed multiplier on armor health, applied on top of the HealthCoef server setting
 
 	-- External and Terminal Ballistics
 	ACF.DragDiv              = 80 -- Drag fudge factor
@@ -316,7 +327,7 @@ do -- ACF global vars
 		Steel		= 0.032,	-- Projectile steel
 		Aluminum	= 0.2,	-- Sabot material
 		Copper		= 0.1,	-- Liner for HEAT cones
-		Tungsten	= 0.24,	-- Expensive
+		Tungsten	= 0.165,	-- Expensive
 		CompB		= 0.08,	-- Normal explosives
 		Octol		= 0.24,	-- Snowflakium, needs to be expensive as a balancing measure
 
@@ -382,7 +393,8 @@ do -- ACF global vars
 		acf_rack	= true
 	}
 	ACF.LightweightTurretMassLimit = 300	-- kg. Turrets at or under this carried mass can be controlled by a shared-parent Gunner, or a Lightweight Turret Controller, without needing to be mounted on it
-	ACF.CasemateArcLimit = 30	-- Degrees of total arc (MaxDeg - MinDeg) at or under which a shared-parent Gunner controls a turret at any mass, so casemate mounts don't need the gunner parented to the ring
+	ACF.LightweightTurretCaliberLimit = 90	-- mm. Turrets with weapons at or under this caliber can be controlled by a Lightweight Turret Controller
+	ACF.CasemateArcLimit = 180	-- Degrees of total arc (MaxDeg - MinDeg), i.e. +-90, at or under which a shared-parent Gunner above the vertical drive controls a turret at any mass, so casemate mounts don't need the gunner parented to the ring
 
 	ACF.CrewRepTimeBase 	= 3		-- Base time to replace a crew member
 	ACF.CrewRepDistToTime 	= 0.05 	-- Time it takes for crew to move one inch during replacement
@@ -475,6 +487,7 @@ elseif CLIENT then
 	CreateClientConVar("acf_maxroundsdisplay", 16, true, false, "Maximum rounds to display before using bulk display (0 to only display bulk)", 0, 5000)
 	CreateClientConVar("acf_drawboxes", 1, true, false, "Whether or not to draw hitboxes on ACF entities", 0, 1)
 	CreateClientConVar("acf_legalhints", 1, true, true, "If enabled, ACF will throw a warning hint whenever an entity gets disabled.", 0, 1)
+	CreateClientConVar("acf_legalvisuals", 1, true, true, "If enabled, ACF will highlight your disabled entities, and the unmet requirements of your entities, and show what is causing it.", 0, 1)
 	CreateClientConVar("acf_legalshame", 0, true, true, "If enabled, you will get a message in console from the server if someone else has an ACF entity get disabled, but only when the server has that logging enabled.", 0, 1)
 	CreateClientConVar("acf_debris", 1, true, false, "Toggles ACF Debris.", 0, 1)
 	CreateClientConVar("acf_debris_autolod", 1, true, false, "Automatically disables some effects on debris if FPS is low.", 0, 1)

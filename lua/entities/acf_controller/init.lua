@@ -18,6 +18,7 @@ AddCSLuaFile("modules_cl/camera.lua")
 AddCSLuaFile("modules_cl/hud.lua")
 
 AddCSLuaFile("modules_sh/helpers_sh.lua")
+AddCSLuaFile("modules_sh/binds_sh.lua")
 
 -- Localizations
 local ACF = ACF
@@ -33,11 +34,13 @@ util.AddNetworkString("ACF_Controller_Zoom")	-- Relay camera zooms
 util.AddNetworkString("ACF_Controller_Ammo")	-- Relay ammo counts
 util.AddNetworkString("ACF_Controller_Receivers")	-- Relay LWS/RWS data
 util.AddNetworkString("ACF_Controller_Radar")	-- Relay radar data
-util.AddNetworkString("ACF_Controller_Button")	-- Forward button presses to the client, PlayerButtonDown doesn't fire client side in singleplayer
+util.AddNetworkString("ACF_Controller_Button")	-- Forward button presses and releases to the client, PlayerButtonDown/Up don't fire client side in singleplayer
+util.AddNetworkString("ACF_Controller_Action")	-- Receive rebound keyboard actions from the client
 
 local Clock = Utilities.Clock
 local Defaults = include("modules/defaults.lua")
 include("modules_sh/helpers_sh.lua")
+include("modules_sh/binds_sh.lua") -- Reads the helpers above, and must precede the modules that register bind handlers
 
 local ControllerLinkRegistry = {}
 function ACF.RegisterControllerLink(Class, Config)
@@ -116,10 +119,11 @@ do
 	end
 
 	function ENT:ACF_PreSpawn(Player)
-		self.ACF       = {}
-		self.Driver    = nil
-		self.Active    = false
-		self.KeyStates = {}
+		self.ACF          = {}
+		self.Driver       = nil
+		self.Active       = false
+		self.KeyStates    = {}
+		self.ActionStates = {}
 
 		self.ACF.Model = "models/hunter/plates/plate025x025.mdl"
 		self:SetModel("models/hunter/plates/plate025x025.mdl")
@@ -147,7 +151,7 @@ do
 	end
 
 	function ENT:ACF_PostSpawn()
-		ACF.AugmentedTimer(function(_) self:UpdateOverlay() end, function() return IsValid(self) end, nil, {MinTime = 1, MaxTime = 1})
+		ACF.AugmentedTimer(function(_) self:UpdateParentHint() self:RefreshDrivetrain() self:UpdateDrivetrainHints() self:UpdateOverlay() end, function() return IsValid(self) end, nil, {MinTime = 1, MaxTime = 1})
 	end
 
 	function ENT:ACF_PostMenuSpawn()
@@ -295,6 +299,7 @@ do
 		if iters % 7 == 0 then self:ProcessHUDs(SelfTbl) end
 
 		if iters % SelfTbl.RadarUpdateRate == 0 then self:ProcessRadars(SelfTbl) end
+		self:ProcessRadarSlaving(SelfTbl)
 
 		SelfTbl.iters = iters + 1
 		self:UpdateOverlay()

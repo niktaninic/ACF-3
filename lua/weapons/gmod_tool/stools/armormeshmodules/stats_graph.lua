@@ -48,16 +48,14 @@ local function BuildAxisRanges(List, Visible)
 	return Ranges
 end
 
-local function GetSortedList(ArmorTypes)
+local function GetSortedList(RawList)
 	local List = {}
 
-	for _, Data in pairs(ArmorTypes.GetEntries()) do
+	for _, Data in ipairs(RawList) do
 		if Data.SuppressLoad then continue end
 
 		List[#List + 1] = Data
 	end
-
-	table.SortByMember(List, "RegisterOrder", true)
 
 	return List
 end
@@ -69,8 +67,8 @@ local StaticRangeExcludedIDs = { Default = true, Flesh = true, Wing = true, Rein
 -- now; the axes instead stay fixed against the same static material set the old ExcludeFromStatsGraph used.
 local RebuildRangesOnSelect = false
 
-return function(Base, ArmorTypes)
-	local List    = GetSortedList(ArmorTypes)
+return function(Base, RawList)
+	local List    = GetSortedList(RawList)
 	local Visible = {}
 
 	local StaticVisible = {}
@@ -84,8 +82,29 @@ return function(Base, ArmorTypes)
 		Visible[Data] = false
 	end
 
+	local NormalizeKey
+
+	local NormalizeBox = Base:AddPanel("DComboBox")
+	NormalizeBox:Dock(TOP)
+	NormalizeBox:DockMargin(0, 0, 0, 5)
+	NormalizeBox:SetValue("Normalize on...")
+	NormalizeBox:SetSortItems(false)
+	NormalizeBox:AddChoice("---", "")
+
+	for _, Axis in ipairs(Axes) do
+		NormalizeBox:AddChoice(Axis.Label, Axis.Key)
+	end
+
 	local Graph = Base:AddPanel("DPanel")
 	Graph:SetTall(220)
+
+	function NormalizeBox:OnSelect(_, _, Key)
+		NormalizeKey = Key ~= "" and Key or nil
+
+		if not NormalizeKey then
+			self:SetValue("Normalize on...")
+		end
+	end
 
 	local AxisLabels = {}
 
@@ -121,6 +140,9 @@ return function(Base, ArmorTypes)
 	Graph.Paint = function(_, W, H)
 		local AxisCount = #Axes
 
+		surface.SetDrawColor(200, 200, 200, 25)
+		surface.DrawRect(0, 0, W, H)
+
 		-- Grid rings
 		surface.SetDrawColor(175, 175, 175, 255)
 		for Ring = 1, 4 do
@@ -148,15 +170,58 @@ return function(Base, ArmorTypes)
 		-- One filled, translucent polygon per toggled-on armor type
 		draw.NoTexture()
 
+		local AllFractions = {}
+		local LongestFraction = 0
+
+		for _, Data in ipairs(List) do
+			if not Visible[Data] then continue end
+
+			local Fractions = {}
+			local NormFraction
+
+			for Index, Axis in ipairs(Axes) do
+				local Fraction = GetAxisFraction(Data, Axis, Ranges[Axis.Key])
+				Fractions[Index] = Fraction
+
+				if Axis.Key == NormalizeKey then
+					NormFraction = Fraction
+				end
+			end
+
+			-- Scales every axis by the same factor so the chosen axis lands exactly on the outer ring.
+			if NormFraction and NormFraction > 0 then
+				local Scale = 1 / NormFraction
+
+				for Index = 1, #Fractions do
+					Fractions[Index] = Fractions[Index] * Scale
+				end
+			end
+
+			for _, Fraction in ipairs(Fractions) do
+				LongestFraction = math.max(LongestFraction, Fraction)
+			end
+
+			AllFractions[Data] = Fractions
+		end
+
+		-- Shrinks every material by the same amount so the single longest axis across all of them just reaches the ring.
+		if LongestFraction > 1 then
+			for _, Fractions in pairs(AllFractions) do
+				for Index = 1, #Fractions do
+					Fractions[Index] = Fractions[Index] / LongestFraction
+				end
+			end
+		end
+
 		for ListIndex, Data in ipairs(List) do
 			if not Visible[Data] then continue end
 
 			local Col = ACF.GetIndexColor(ListIndex - 1)
 			local Poly = {}
+			local Fractions = AllFractions[Data]
 
-			for Index, Axis in ipairs(Axes) do
-				local Fraction = GetAxisFraction(Data, Axis, Ranges[Axis.Key])
-				local X, Y = GetPoint(W, H, Index, Fraction)
+			for Index in ipairs(Axes) do
+				local X, Y = GetPoint(W, H, Index, Fractions[Index])
 
 				Poly[Index] = { x = X, y = Y }
 			end
@@ -204,6 +269,7 @@ return function(Base, ArmorTypes)
 		Label:SetText(Data.ShortName or Data.Name)
 		Label:SetDark(true)
 		Label:SetMouseInputEnabled(false)
+		Label:SetAlpha(Visible[Data] and 255 or 120)
 
 		function Row:DoClick()
 			Visible[Data] = not Visible[Data]

@@ -4,14 +4,15 @@ local ModelData = ACF.ModelData
 -- Note: Put this in console for good luck: hook.Run("ACF_OnLoadAddon")
 
 -- TODO: Move these into the globals file
-local CubicInchToM3 = ACF.InchToMCu
-local HealthMul = ACF.HealthCoef
-local ArmorCoef = ACF.ArmorCoef
-local ArmorTypes = ACF.Classes.ArmorTypes
+local GCmToKgIn = ACF.gCmToKgIn
+local ArmorHealthScale = ACF.ArmorHealthScale
+local Classes = ACF.Classes
+
+local function GetArmorType(ID) return Classes.GetSubtypeByName("ACF.ArmorTypes.BaseArmorType", "ACF.ArmorTypes." .. tostring(ID)) end
 
 -- Networking: whenever a convex's material is set (serverside), the new material is sent straight to
 -- every client. No request/refresh cycle -- just send it the moment it changes.
-local MAX_CONVEXES  = 5 -- bits for the convex index field
+local MAX_CONVEXES  = 5 -- bits for the convex index and count fields
 local MAX_MATERIALS = 5 -- bits for the material index field
 
 local ArmorTypeByIndex   = {} -- index (1-based int) -> armor type ID string
@@ -19,7 +20,11 @@ local ArmorTypeIndexByID = {} -- armor type ID string -> index (1-based int)
 
 -- Built once after all armor types are registered; neither table changes after this.
 hook.Add("ACF_OnLoadAddon", "ACF_BuildArmorTypeIndex", function()
-    local List = ArmorTypes.GetList()
+    local List = {}
+    for I, Entry in ipairs(Classes.GetSubtypesAsList("ACF.ArmorTypes.BaseArmorType")) do
+        List[I] = Entry
+    end
+
     table.sort(List, function(A, B) return A.ID < B.ID end)
 
     for I, Entry in ipairs(List) do
@@ -30,9 +35,48 @@ end)
 
 if SERVER then
     util.AddNetworkString("ACF_ConvexMaterialSet")
+
+    local function SendMaterials(Entity, Materials, Player)
+        local Count = table.Count(Materials)
+        if Count == 0 then return end
+
+        net.Start("ACF_ConvexMaterialSet")
+        net.WriteUInt(Entity:EntIndex(), MAX_EDICT_BITS)
+        net.WriteUInt(Count, MAX_CONVEXES)
+
+        for ConvexID, MaterialID in pairs(Materials) do
+            net.WriteUInt(ConvexID, MAX_CONVEXES)
+            net.WriteUInt(ArmorTypeIndexByID[MaterialID] or ArmorTypeIndexByID["Default"] or 1, MAX_MATERIALS)
+        end
+
+        if Player then net.Send(Player) else net.Broadcast() end
+    end
+
+    ACF.SendConvexMaterials = SendMaterials
+
+    -- Materials are only sent when they change, so players joining later need everything set before them
+    hook.Add("ACF_OnLoadPlayer", "ACF_ConvexMaterialSync", function(Player)
+        for _, Entity in ents.Iterator() do
+            local MeshData = Entity.ACF_Volumetric_Mesh
+            if not MeshData then continue end
+
+            local Materials
+            for ConvexID, Convex in ipairs(MeshData.Convexes) do
+                if Convex.Material and Convex.Material ~= "Default" then
+                    Materials = Materials or {}
+                    Materials[ConvexID] = Convex.Material
+                end
+            end
+
+            if Materials then SendMaterials(Entity, Materials, Player) end
+        end
+    end)
 end
 
 if CLIENT then
+    -- Materials set on the same tick an entity is created can arrive before the entity exists clientside
+    local Pending = {} -- EntIndex -> { Materials = {...}, Time = CurTime() }
+
     net.Receive("ACF_ConvexMaterialSet", function()
         local EntIndex = net.ReadUInt(MAX_EDICT_BITS)
         local Count    = net.ReadUInt(MAX_CONVEXES)
@@ -45,9 +89,33 @@ if CLIENT then
         end
 
         local Ent = Entity(EntIndex)
-        if not IsValid(Ent) then return end
+        if not IsValid(Ent) then
+            local Entry = Pending[EntIndex]
+            if not Entry then
+                Entry = { Materials = {} }
+                Pending[EntIndex] = Entry
+            end
+
+            table.Merge(Entry.Materials, Materials)
+            Entry.Time = CurTime()
+
+            return
+        end
 
         ACF.SetConvexMaterials(Ent, Materials)
+    end)
+
+    hook.Add("NetworkEntityCreated", "ACF_ConvexMaterialPending", function(Ent)
+        local EntIndex = Ent:EntIndex()
+        local Entry    = Pending[EntIndex]
+        if not Entry then return end
+
+        Pending[EntIndex] = nil
+
+        -- Anything this old was for whatever entity used this index before
+        if CurTime() - Entry.Time > 10 then return end
+
+        ACF.SetConvexMaterials(Ent, Entry.Materials)
     end)
 end
 
@@ -70,14 +138,12 @@ local ArmorableClasses = {
     primitive_shape = true,
     primitive_staircase = true,
     primitive_ladder = true,
-    primitive_rail_silder = true,
+    primitive_rail_slider = true,
     primitive_airfoil = true,
     primitive_convex_hull = true,
 }
 
 do
-    local ArmorTypes = ACF.Classes.ArmorTypes
-
     -- Sets the materials ({[ConvexID] = MaterialID, ...}) of one or more convexes.
     -- Batches network updates.
     -- Returns false if any convex was rejected (e.g. an explosive material on too large a convex)
@@ -92,7 +158,7 @@ do
             -- picks them up once the mesh exists, instead of silently dropping them.
             for ConvexID, Material in pairs(Materials) do
                 -- print("SetConvexMaterial", Entity, ConvexID, Material)
-                local ArmorType = ArmorTypes.Get(Material) or ArmorTypes.Get("Default")
+                local ArmorType = GetArmorType(Material) or GetArmorType("Default")
                 Entity.ACF_Volumetric_Materials[ConvexID] = ArmorType.ID
             end
             return
@@ -106,7 +172,7 @@ do
             local Convex = MeshData.Convexes[ConvexID]
             if not Convex then continue end
 
-            local ArmorType = ArmorTypes.Get(Material) or ArmorTypes.Get("Default")
+            local ArmorType = GetArmorType(Material) or GetArmorType("Default")
 
             if ArmorType.IsExplosive and (Convex.Volume < ACF.MinExplosiveConvexVolume or Convex.Volume > ACF.MaxExplosiveConvexVolume) then
                 if SERVER and IsValid(Player) then
@@ -116,10 +182,13 @@ do
                 continue
             end
 
+            -- Changing the material shouldn't repair the convex, keep however damaged it was
+            local HealthRatio  = Convex.MaxHealth > 0 and math.Clamp(Convex.Health / Convex.MaxHealth, 0, 1) or 1
+
             Convex.Material    = ArmorType.ID
-            Convex.Mass        = Convex.Volume * CubicInchToM3 * ArmorType.Density -- Volume is in^3, Density is kg/m^3
-            Convex.MaxHealth   = Convex.Volume * ArmorType.HealthMul * HealthMul -- HealthMul bakes in material density
-            Convex.Health      = Convex.MaxHealth
+            Convex.Mass        = Convex.Volume * ArmorType.Density * GCmToKgIn -- Volume is in^3, Density is g/cm^3
+            Convex.MaxHealth   = Convex.Volume * ArmorType.HealthMul * ACF.HealthCoef * ArmorHealthScale -- HealthMul bakes in material density
+            Convex.Health      = Convex.MaxHealth * HealthRatio
             Convex.IsExplosive = ArmorType.IsExplosive or nil -- Reactive armor; see Ballistics.DoReactiveArmor
 
             Entity.ACF_Volumetric_Materials[ConvexID] = Convex.Material
@@ -140,22 +209,7 @@ do
         MeshData.HasReactiveArmor  = HasReactive -- Lets ballistics skip the reactive-armor check entirely for normal entities
 
         if SERVER then
-            local Count = 0
-            for _ in pairs(Changed) do Count = Count + 1 end
-            Count = math.min(Count, 31)
-
-            net.Start("ACF_ConvexMaterialSet")
-            net.WriteUInt(Entity:EntIndex(), MAX_EDICT_BITS)
-            net.WriteUInt(Count, MAX_CONVEXES)
-
-            local Sent = 0
-            for ConvexID, MaterialID in pairs(Changed) do
-                if Sent >= Count then break end
-                net.WriteUInt(ConvexID, MAX_CONVEXES)
-                net.WriteUInt(ArmorTypeIndexByID[MaterialID] or ArmorTypeIndexByID["Default"] or 1, MAX_MATERIALS)
-                Sent = Sent + 1
-            end
-            net.Broadcast()
+            ACF.SendConvexMaterials(Entity, Changed)
 
             local HasNonDefault = false
             for _, MaterialID in pairs(Changed) do
@@ -234,12 +288,31 @@ do
         -- TODO: Fix the error that forced me to do this...
         local Meshes = Mesh or {}
 
+        -- Rebuilding the mesh (updating, reclipping...) shouldn't repair it, so keep how damaged each convex was.
+        -- If the convexes changed, fall back to how damaged the entity was overall.
+        local OldRatios, OldRatio
+        local OldMesh = entity.ACF_Volumetric_Mesh
+
+        if OldMesh and OldMesh.Convexes then
+            local Health, MaxHealth = 0, 0
+            OldRatios = {}
+
+            for ConvexID, Convex in ipairs(OldMesh.Convexes) do
+                OldRatios[ConvexID] = Convex.MaxHealth > 0 and math.Clamp(Convex.Health / Convex.MaxHealth, 0, 1) or 1
+                Health    = Health + Convex.Health
+                MaxHealth = MaxHealth + Convex.MaxHealth
+            end
+
+            OldRatio = MaxHealth > 0 and math.Clamp(Health / MaxHealth, 0, 1) or 1
+        end
+
         local MeshData = { Convexes = {} }
 
         for _, Convex in ipairs(Meshes) do
             local Tris   = {}
             local Volume = 0
             local Area   = 0
+            local Sum    = Vector()
             local Mins   = Vector(math.huge, math.huge, math.huge)
             local Maxs   = -Mins
 
@@ -250,6 +323,7 @@ do
 
                 Volume = Volume + A:Dot(B:Cross(C)) -- Scalar triple product gives 6 times the volume
                 Area   = Area + (B - A):Cross(C - A):Length() -- Cross product length gives twice the triangle's area
+                Sum    = Sum + (A + B + C) / 3
 
                 -- Local-space bounds, so a ray can reject the whole convex without touching its triangles
                 Mins.x = math.min(Mins.x, A.x, B.x, C.x)
@@ -264,6 +338,7 @@ do
 
             Volume = math.abs(Volume) / 6
             Area   = Area / 2
+            Sum    = #Tris > 0 and Sum / #Tris or Sum
 
             -- Material-independent characteristics; material-dependent ones (Material, Mass, Health, MaxHealth)
             -- are filled in below by ACF.SetConvexMaterial.
@@ -271,6 +346,8 @@ do
                 Tris      = Tris,
                 Mins      = Mins,
                 Maxs      = Maxs,
+                Thinnest  = math.min(Maxs.x - Mins.x, Maxs.y - Mins.y, Maxs.z - Mins.z), -- Smallest local bounds size, for the overlap check
+                Centroid  = Sum,
                 Volume    = Volume,
                 MinWidth  = Area > 0 and 2 * Volume / Area or 0, -- Minimum width is empirically atleast half the mean chord length
                 Mass      = 0,
@@ -296,16 +373,31 @@ do
         end
         ACF.SetConvexMaterials(entity, Materials, nil, true)
 
+        if OldRatios then
+            local SameConvexes = #OldRatios == #MeshData.Convexes
+
+            for ConvexID, Convex in ipairs(MeshData.Convexes) do
+                Convex.Health = Convex.MaxHealth * (SameConvexes and OldRatios[ConvexID] or OldRatio)
+            end
+        end
+
         -- ACF entities track their total health as the sum of their convexes' health, separately from the
         -- per-convex health that armorable props (e.g. prop_physics) take damage on directly.
         if entity.IsACFEntity and entity.ACF then
+            local EntACF      = entity.ACF
             local TotalHealth = 0
-            for _, Convex in ipairs(entity.ACF_Volumetric_Mesh.Convexes) do
-                TotalHealth = TotalHealth + Convex.Health
+            for _, Convex in ipairs(MeshData.Convexes) do
+                TotalHealth = TotalHealth + Convex.MaxHealth
             end
 
-            entity.ACF.MaxHealth = TotalHealth
-            entity.ACF.Health    = TotalHealth
+            -- Same as above, updating the entity keeps however damaged it was
+            local Ratio = 1
+            if isnumber(EntACF.Health) and isnumber(EntACF.MaxHealth) and EntACF.MaxHealth > 0 then
+                Ratio = math.Clamp(EntACF.Health / EntACF.MaxHealth, 0, 1)
+            end
+
+            EntACF.MaxHealth = TotalHealth
+            EntACF.Health    = TotalHealth * Ratio
         end
     end
     ACF.ComputeVolumetricMesh = ComputeVolumetricMesh
@@ -351,6 +443,17 @@ do
             end)
         end)
     end)
+end
+
+--- Returns the scale about a convex's centroid that moves each side of its thinnest local axis inwards by about Inset.
+--- Clamped to half, so convexes thinner than four times the inset keep a core around their centroid.
+--- @param Convex table A convex from ACF_Volumetric_Mesh
+--- @param Inset number Distance in units to move each side inwards
+--- @return number Scale
+function ACF.ConvexInsetScale(Convex, Inset)
+    local Width = Convex.Thinnest
+
+    return math.Clamp((Width - 2 * Inset) / Width, 0.5, 1)
 end
 
 if not util.IntersectRayWithTriangle then
@@ -405,8 +508,7 @@ end
 -- (default 1e5, which is past any mesh's extent), so a convex the ray began inside only yields its exit
 -- here; the missing entry is synthesized below at T = 0.
 -- Filter (optional): a per-entity set { [ConvexID] = true } of convexes to treat as transparent.
--- IncludeDefault (optional): also hit convexes with an unassigned material, for tool selection traces.
-function ACF.RayIntersectMesh(Entity, Start, Direction, IncludeDead, IncludeDefault, Filter, MaxDist)
+function ACF.RayIntersectMesh(Entity, Start, Direction, IncludeDead, Filter, MaxDist)
     local MeshData = Entity.ACF_Volumetric_Mesh
     if not MeshData then return {} end
 
@@ -431,7 +533,6 @@ function ACF.RayIntersectMesh(Entity, Start, Direction, IncludeDead, IncludeDefa
 
     for ConvexID, Convex in ipairs(MeshData.Convexes) do
         if Convex.Health <= 0 and not IncludeDead then continue end -- destroyed convex is transparent to projectiles
-        if not IncludeDefault and Convex.Material == "Default" then continue end -- unassigned material is transparent to projectiles and explosions
         if Filter and Filter[ConvexID] then continue end -- explicitly filtered (already penetrated this flight)
 
         -- Meshes built before bounds existed (a live reload) simply skip the broadphase
@@ -469,12 +570,12 @@ end
 local function BuildGapHit(Left, Right, Source, Direction)
     local Entity, ConvexID = Source.Entity, Source.ConvexID
     local Convex    = Entity.ACF_Volumetric_Mesh.Convexes[ConvexID]
-    local ArmorType = ArmorTypes.Get(Convex.Material) or ArmorTypes.Get("Default")
+    local ArmorType = GetArmorType(Convex.Material) or GetArmorType("Default")
 
     return {
         Entity      = Entity,
         ConvexID    = ConvexID,
-        GeoThick    = (Right.T - Left.T) * 25.4 * ArmorCoef, -- inches to mm
+        GeoThick    = (Right.T - Left.T) * 25.4 * ACF.ArmorCoef, -- inches to mm
         ArmorType   = ArmorType,
         HitAngle    = math.deg(math.acos(math.min(1, math.max(-1, -Direction:Dot(Left.Normal))))),
         EntryPos    = Left.Pos,
@@ -547,22 +648,22 @@ end
 -- Every convex entry/exit pair the ray passes through a single entity's mesh, in order (see
 -- ACF.ResolveConvexStack). GeoThick is in mm; multiply by ArmorType.KineticMul/.ChemicalMul as needed.
 -- Filter (optional) is a per-entity set { [ConvexID] = true } of convexes to treat as transparent.
-function ACF.GetConvexHits(Entity, HitPos, Direction, IncludeDead, IncludeDefault, Filter)
+function ACF.GetConvexHits(Entity, HitPos, Direction, IncludeDead, Filter)
     if not Entity.ACF_Volumetric_Mesh then return {} end
 
     local Start = HitPos - Direction * 2
-    local Hits  = ACF.RayIntersectMesh(Entity, Start, Direction, IncludeDead, IncludeDefault, Filter)
+    local Hits  = ACF.RayIntersectMesh(Entity, Start, Direction, IncludeDead, Filter)
 
     return ACF.ResolveConvexStack(Hits, Direction)
 end
 
 -- Convenience wrapper returning only the closest convex entry/exit pair (or nil if none); see
 -- ACF.ResolveConvexStack's ClosestOnly argument.
-function ACF.GetConvexHit(Entity, HitPos, Direction, IncludeDead, IncludeDefault, Filter)
+function ACF.GetConvexHit(Entity, HitPos, Direction, IncludeDead, Filter)
     if not Entity.ACF_Volumetric_Mesh then return nil end
 
     local Start = HitPos - Direction * 2
-    local Hits  = ACF.RayIntersectMesh(Entity, Start, Direction, IncludeDead, IncludeDefault, Filter)
+    local Hits  = ACF.RayIntersectMesh(Entity, Start, Direction, IncludeDead, Filter)
 
     return ACF.ResolveConvexStack(Hits, Direction, true)
 end
@@ -611,10 +712,13 @@ local function TestTrace( ply )
 
     for Index, Hit in ipairs(Hits) do
         local Col = ACF.GetIndexColor(Index)
-        debugoverlay.Line(Hit.EntryPos, Hit.ExitPos, 10, Col, true)
-        debugoverlay.EntityTextAtPosition((Hit.EntryPos + Hit.ExitPos) / 2, 0, Hit.ArmorType.Name, 10, Col)
-        debugoverlay.EntityTextAtPosition((Hit.EntryPos + Hit.ExitPos) / 2, 1, "CID: " .. Hit.ConvexID, 10, Col)
-        debugoverlay.EntityTextAtPosition((Hit.EntryPos + Hit.ExitPos) / 2, 2, "RHAe: " .. math.Round(Hit.GeoThick * Hit.ArmorType.KineticMul), 10, Col)
+        if ACF.Debug.SetDeveloperLevel(1) then
+            ACF.Debug.SetTarget(ply)
+            ACF.Debug.Line(Hit.EntryPos, Hit.ExitPos, 10, Col, true)
+            ACF.Debug.EntityTextAtPosition((Hit.EntryPos + Hit.ExitPos) / 2, 0, Hit.ArmorType.Name, 10, Col)
+            ACF.Debug.EntityTextAtPosition((Hit.EntryPos + Hit.ExitPos) / 2, 1, "CID: " .. Hit.ConvexID, 10, Col)
+            ACF.Debug.EntityTextAtPosition((Hit.EntryPos + Hit.ExitPos) / 2, 2, "RHAe: " .. math.Round(Hit.GeoThick * Hit.ArmorType.KineticMul), 10, Col)
+        end
     end
 end
 
@@ -639,18 +743,27 @@ local function DrawConvexes( ply )
             local B = Ent:LocalToWorld(Tri[2])
             local C = Ent:LocalToWorld(Tri[3])
 
-            debugoverlay.Triangle(A, B, C, 10, FillCol, true)
-            debugoverlay.Line(A, B, 10, color_white, true)
-            debugoverlay.Line(B, C, 10, color_white, true)
-            debugoverlay.Line(C, A, 10, color_white, true)
+            if ACF.Debug.SetDeveloperLevel(1) then
+                ACF.Debug.SetTarget(ply)
+                ACF.Debug.Triangle(A, B, C, 10, FillCol, true)
+                ACF.Debug.Line(A, B, 10, color_white, true)
+                ACF.Debug.Line(B, C, 10, color_white, true)
+                ACF.Debug.Line(C, A, 10, color_white, true)
+            end
 
             local Center = (A + B + C) / 3
             local Normal = (C - A):Cross(B - A):GetNormalized()
-            debugoverlay.Line(Center, Center + Normal * 5, 10, Col, true)
+            if ACF.Debug.SetDeveloperLevel(1) then
+                ACF.Debug.SetTarget(ply)
+                ACF.Debug.Line(Center, Center + Normal * 5, 10, Col, true)
+            end
         end
 
         local Center = Ent:LocalToWorld(Convex.Tris[1][1])
-        debugoverlay.EntityTextAtPosition(Center, 0, "CID: " .. ConvexID, 10, Col)
+        if ACF.Debug.SetDeveloperLevel(1) then
+            ACF.Debug.SetTarget(ply)
+            ACF.Debug.EntityTextAtPosition(Center, 0, "CID: " .. ConvexID, 10, Col)
+        end
     end
 end
 
@@ -678,18 +791,27 @@ local function DrawMeshConvexes( ply )
             local B = Ent:LocalToWorld(Hull[I + 1].pos)
             local C = Ent:LocalToWorld(Hull[I + 2].pos)
 
-            debugoverlay.Triangle(A, B, C, 10, FillCol, true)
-            debugoverlay.Line(A, B, 10, color_white, true)
-            debugoverlay.Line(B, C, 10, color_white, true)
-            debugoverlay.Line(C, A, 10, color_white, true)
+            if ACF.Debug.SetDeveloperLevel(1) then
+                ACF.Debug.SetTarget(ply)
+                ACF.Debug.Triangle(A, B, C, 10, FillCol, true)
+                ACF.Debug.Line(A, B, 10, color_white, true)
+                ACF.Debug.Line(B, C, 10, color_white, true)
+                ACF.Debug.Line(C, A, 10, color_white, true)
+            end
 
             local Center = (A + B + C) / 3
             local Normal = (C - A):Cross(B - A):GetNormalized()
-            debugoverlay.Line(Center, Center + Normal * 5, 10, Col, true)
+            if ACF.Debug.SetDeveloperLevel(1) then
+                ACF.Debug.SetTarget(ply)
+                ACF.Debug.Line(Center, Center + Normal * 5, 10, Col, true)
+            end
         end
 
         local Center = Ent:LocalToWorld(Hull[1].pos)
-        debugoverlay.EntityTextAtPosition(Center, 0, "CID: " .. ConvexID, 10, Col)
+        if ACF.Debug.SetDeveloperLevel(1) then
+            ACF.Debug.SetTarget(ply)
+            ACF.Debug.EntityTextAtPosition(Center, 0, "CID: " .. ConvexID, 10, Col)
+        end
     end
 end
 

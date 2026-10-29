@@ -32,7 +32,7 @@ local function CheckReceive(Entity)
 	local Dir = Vector()
 	local Ang = Angle()
 
-	if Entity.ACF.Health <= 0 then ResetOutputs(Entity) return end -- Destroyed
+	if ACF.IsDestroyed(Entity) then ResetOutputs(Entity) return end
 
 	if not Entity.GetSources then return end
 	if not Entity.CheckLOS then return end
@@ -112,7 +112,15 @@ do -- Spawning
 		self.Damage = 0
 	end
 
-	function ENT:ACF_PostSpawn()
+	function ENT.ACF_CheckSpawnLimit(Player)
+		return Player:CheckLimit("_acf_sensor")
+	end
+
+	function ENT:ACF_PostSpawn(Player)
+		if IsValid(Player) then
+			Player:AddCount("_acf_sensor", self)
+		end
+
 		SetActive(self, true)
 	end
 end

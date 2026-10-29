@@ -75,7 +75,7 @@ return function(State)
 
         local RadarData = {}
         for _ = 1, Count do
-            local ID = net.ReadUInt(6)
+            local ID = net.ReadUInt(16)
             local Name = net.ReadString()
             local Pos = net.ReadVector()
             RadarData[ID] = {Pos, Name}
@@ -108,7 +108,7 @@ return function(State)
         State.SelectedTargetID = State.CurrentTargetID
         net.Start("ACF_Controller_Radar")
         net.WriteUInt(State.MyController:EntIndex(), MAX_EDICT_BITS)
-        net.WriteUInt(State.SelectedTargetID or 0, 6)
+        net.WriteUInt(State.SelectedTargetID or 0, 16)
         net.SendToServer()
     end
 
@@ -125,18 +125,17 @@ return function(State)
                 if Button == KeyIndex + 1 then SelectAmmo(WeaponSlot, i) end
             end
         end
-
-        if Button == KEY_F then SelectRadarTarget() end
     end
 
-    hook.Add("PlayerButtonDown", "ACFControllerSeatButtonDown", function(_, Button)
-        if not IsFirstTimePredicted() then return end
-        OnButtonDown(Button)
+    -- Relayed by modules_sh/binds_sh.lua, which owns the driver's button input in both realms
+    hook.Add("ACF_ControllerButton", "ACFControllerAmmoKeys", function(Button, Down)
+        if Down then OnButtonDown(Button) end
     end)
 
-    -- Singleplayer fallback, PlayerButtonDown doesn't fire client side there, so the server forwards it
-    net.Receive("ACF_Controller_Button", function()
-        OnButtonDown(net.ReadUInt(8))
+    hook.Add("ACF_ControllerBindChanged", "ACFControllerRadarLock", function(ActionID, Down)
+        if ActionID ~= "RadarLock" or not Down then return end
+        if not IsValid(State.MyController) then return end
+        SelectRadarTarget()
     end)
 
     local rangerTrace = {}

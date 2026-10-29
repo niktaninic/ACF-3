@@ -227,6 +227,46 @@ do -- Mobility functions
 		end
 		return math.Round(Ratio, 3)
 	end
+
+	ACF.WheelAxes     = { Vector(1, 0, 0), Vector(0, 1, 0), Vector(0, 0, 1) }
+	ACF.WheelAxisName = { "X", "Y", "Z" }
+
+	local AMBIGUOUS = 0.05 -- Below this alignment with the gearbox's right the dot's sign is noise a paste can flip
+
+	-- The classes a gearbox links wheels as
+	function ACF.CanSetWheelAxis(Entity)
+		if not IsValid(Entity) then return false end
+
+		local Class = Entity:GetClass()
+
+		return Class == "prop_physics" or Class == "tire"
+	end
+
+	--- Direction (+-1) a wheel axis is applied in: along the gearbox's right, unless a defined axis is too
+	--- perpendicular to it to tell, where the stored direction is used instead.
+	function ACF.GetAxisSign(WorldAxis, GearboxRight, Stored)
+		local Dot = WorldAxis:Dot(GearboxRight)
+
+		if Stored and math.abs(Dot) < AMBIGUOUS then return Stored end
+
+		return Dot < 0 and -1 or 1
+	end
+
+	--- Index (1-3 for local X/Y/Z) of the wheel's axis closest to a world direction, and which way (+-1) it runs.
+	function ACF.GetWheelAxis(Entity, WorldDir)
+		-- Link axes are applied in the physics frame, which the client may not have a physobj for
+		local Phys  = Entity:GetPhysicsObject()
+		local Local = IsValid(Phys) and Phys:WorldToLocalVector(WorldDir) or Entity:WorldToLocal(Entity:GetPos() + WorldDir)
+		local Best, BestDot = 1, -1
+
+		for I = 1, 3 do
+			local Dot = math.abs(Local[I])
+
+			if Dot > BestDot then Best, BestDot = I, Dot end
+		end
+
+		return Best, Local[Best] < 0 and -1 or 1
+	end
 end
 
 do -- Unit conversion
@@ -331,7 +371,10 @@ do
 
 		-- For the entity sending power, this is the direction of a "straight" shaft
 		local OP, OutputWorldDir = Output:ApplyTo(OutputEntity)
-		debugoverlay.Line(OP, OP + (OutputWorldDir * 200), 5, Color(20, 255, 20))
+		-- if ACF.Debug.SetDeveloperLevel(2) then
+			-- ACF.Debug.SetTarget(SERVER and OutputEntity:CPPIGetOwner() or nil)
+			-- ACF.Debug.Line(OP, OP + (OutputWorldDir * 200), 5, Color(20, 255, 20))
+		-- end
 
 		-- Gearbox -> prop connections mean that Input will be nil, because props don't have a power input
 		-- like gearboxes do. So this just switches back to the old way of checking in one direction.
@@ -349,7 +392,10 @@ do
 
 		-- For the entity receiving power, this is the direction of a "straight" shaft
 		local IP, InputWorldDir = Input:ApplyTo(InputEntity)
-		debugoverlay.Line(IP, IP + (InputWorldDir * 200), 5, Color(255, 20, 20))
+		-- if ACF.Debug.SetDeveloperLevel(2) then
+			-- ACF.Debug.SetTarget(SERVER and InputEntity:CPPIGetOwner() or nil)
+			-- ACF.Debug.Line(IP, IP + (InputWorldDir * 200), 5, Color(255, 20, 20))
+		-- end
 
 		-- For the entity sending power, the deviation between the shaft and what it considers "straight"
 		local OutToIn = math.deg(math.acos((OP - IP):GetNormalized():Dot(InputWorldDir)))

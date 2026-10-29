@@ -2,12 +2,14 @@ DEFINE_BASECLASS("acf_base_simple")
 
 ACF.Entities.AutoRegister(2026091001, function(CLASS)
 	-- The engine type this entity represents. Engines aren't scalable, so this is the only config field.
-	MENU_FIELD("ACF.Engines.BaseEngine", "Engine", {OnlyAllowSubtypes = true, InstantiateTypeForDefault = "ACF.Engines.5.7-V8"})
+	MENU_FIELD("ACF.Engines.BaseEngine", "Engine", {OnlyAllowSubtypes = true, OnlyAllowLeafTypes = true, InstantiateTypeForDefault = "ACF.Engines.5.7-V8"})
 
 	-- Nothing to validate: the Engine field is constrained to ACF.Engines.* subtypes by the serializer.
 	function CLASS:VerifyData()
 	end
 end, "Engine", "Engines")
+
+ENT.IsACFEngine = true -- Used by the engine legality restrictions
 
 ENT.ACF_StaticWireInputs = {
 	"Active (If set to a non-zero value, it'll attempt to start the engine.)",

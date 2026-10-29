@@ -53,6 +53,7 @@ local IsEntityValid  = ACF.Optimizations.IsEntityValid
 -- by short id (the FQN suffix). Resolve via the registry.
 local function GetCrewType(ID)  return Classes.GetSubtypeByName("ACF.CrewTypes.BaseCrewType",   "ACF.CrewTypes."   .. tostring(ID)) end
 local function GetCrewModel(ID) return Classes.GetSubtypeByName("ACF.CrewModels.BaseCrewModel", "ACF.CrewModels." .. tostring(ID)) end
+local function GetCrewPose(ID)  return Classes.GetSubtypeByName("ACF.CrewPoses.BaseCrewPose",   "ACF.CrewPoses."   .. tostring(ID)) end
 
 -- Fall back to the defaults if a (legacy) id no longer maps to a class, so reconfigure/dupe never nils.
 function ENT:GetCrewType()  return GetCrewType(self:ACF_GetUserVar("CrewTypeID")) or GetCrewType("Commander") end
@@ -177,24 +178,29 @@ function ENT:CFW_PreParentedTo(OldParent, _)
 			for Target in pairs(self.Targets) do
 				self:Unlink(Target)
 			end
+
+			self.ACF_UnlinkReason = "the crew member was reparented"
 		end
+		self:UpdateLinkHint()
 		self:CFW_Unindex_Crew(self:CFW_GetContraption())
 		self:CFW_Index_Crew(self:CFW_GetContraption())
 	end
 end
 
+--- Shows the not linked hint while a crew that needs links has none, with why its links were removed if they were.
+function ENT:UpdateLinkHint()
+	local Targets   = self.Targets
+	local Unlinked  = Targets == nil or next(Targets) == nil
+	local NeedsLink = self.CrewTypeID ~= "Commander" and self.CrewTypeID ~= "Driver"
+
+	if not Unlinked then self.ACF_UnlinkReason = nil end
+
+	ACF.Hints.Set(self, "crew_unlinked", NeedsLink and Unlinked, { Reason = self.ACF_UnlinkReason })
+end
+
 -- Checks the parent state. Must run first in the think order so we can exit early and avoid unlinks
 local function CheckParentState(crew)
-	if not ACF.IsParentChainStateOK(crew) then
-		crew.Disabled = {
-			Reason = "Bad Parent",
-			Message = "Must be parented correctly!"
-		}
-		crew.TotalEff = 0
-		return false
-	end
-
-	return true
+	return ACF.IsParentChainStateOK(crew)
 end
 
 --- Check other crews of the same type and enforce convar limits
@@ -218,7 +224,6 @@ local function EnforceLimits(crew)
 	end
 
 	if CrewType.EnforceLimits then CrewType.EnforceLimits(crew) end
-	CrewTable.Disabled = nil
 end
 
 local Vector0  = Vector(0, 0, 0)
@@ -355,12 +360,13 @@ do -- Random timer stuff
 					Reasons = string.upper(Reasons[1]) .. string.sub(Reasons, 2)
 
 					Notify.EntityWarning(self, "Crew member unlinked. ", Reasons)
+
+					SelfTbl.ACF_UnlinkReason = Reasons:lower()
 				end
 			end
 		end
 
-		SelfTbl.OverlayErrors.ParentCheck = not IsParented and "This crew must be parented correctly!\n(parent to zero or more turret entities, ending in a baseplate)" or nil
-		SelfTbl.OverlayErrors.LinkCheck = SelfTbl.CrewTypeID ~= "Commander" and SelfTbl.CrewTypeID ~= "Driver" and (Targets == nil or table.Count(Targets) == 0) and "This crew must be linked!" or nil
+		self:UpdateLinkHint()
 
 		EnforceLimits(self)
 
@@ -427,9 +433,20 @@ do -- Random timer stuff
 end
 
 do
-	-- Field defaults + numeric clamps are handled by the serializer; only the player-model string
-	-- truncation needs a verify step.
+	-- Field defaults + numeric clamps are handled by the serializer.
 	function ENT.ACF_OnVerifyClientData(ClientData)
+		if ClientData.CrewTypeID ~= nil and not GetCrewType(ClientData.CrewTypeID) then
+			ClientData.CrewTypeID = "Commander"
+		end
+
+		if ClientData.CrewModelID ~= nil and not GetCrewModel(ClientData.CrewModelID) then
+			ClientData.CrewModelID = "Sitting"
+		end
+
+		if ClientData.CrewPoseID ~= nil and ClientData.CrewPoseID ~= "" and not GetCrewPose(ClientData.CrewPoseID) then
+			ClientData.CrewPoseID = ""
+		end
+
 		if isstring(ClientData.CrewPlayerModel) then
 			ClientData.CrewPlayerModel = string.sub(ClientData.CrewPlayerModel, 1, 260)
 		end
@@ -483,8 +500,6 @@ do
 		Entity:ACF_SetEntityName("ACF Crew Member") -- Set overlay wire entity name
 
 		Entity.ACF.Model = CrewModel.Model
-
-		Entity.OverlayErrors = {}
 
 		ACF.Activate(Entity, true)
 
@@ -544,22 +559,31 @@ do
 		return Player:CheckLimit("_acf_crew")
 	end
 
-	function ENT:ACF_PostUpdateEntityData()
-		local OldType = self.CrewTypeID
+	-- A crew-type change invalidates existing links, cleared while the old type's handlers and index entries still apply
+	function ENT:ACF_PreUpdateEntityData(ClientData)
+		if not self.CrewTypeID or ClientData.CrewTypeID == nil or ClientData.CrewTypeID == self.CrewTypeID then return end
 
-		UpdateCrew(self)
+		Notify.EntityWarning(self, "Crew occupation has changed", "This crew member's occupation was changed. All links have been removed, please relink.")
 
-		-- A crew-type change invalidates existing links (no-op on a fresh spawn).
-		if OldType and OldType ~= self.CrewTypeID then
-			Notify.EntityWarning(self, "Crew occupation has changed", "This crew member's occupation was changed. All links have been removed, please relink.")
-
-			if next(self.Targets) then
-				for Target in pairs(self.Targets) do
-					self:Unlink(Target)
-				end
+		if next(self.Targets) then
+			for Target in pairs(self.Targets) do
+				self:Unlink(Target)
 			end
 
-			self:CFW_Unindex_Crew(self:CFW_GetContraption())
+			self.ACF_UnlinkReason = "the crew member's occupation changed"
+		end
+
+		self:CFW_Unindex_Crew(self:CFW_GetContraption())
+		self.ACF_TypeChanged = true
+	end
+
+	function ENT:ACF_PostUpdateEntityData()
+		UpdateCrew(self)
+
+		if self.ACF_TypeChanged then
+			self.ACF_TypeChanged = nil
+
+			self:UpdateLinkHint()
 			self:CFW_Index_Crew(self:CFW_GetContraption())
 		end
 	end
@@ -602,15 +626,7 @@ do
 	function ENT:ACF_UpdateOverlayState(State)
 		local SelfTbl = ENTITY.GetTable(self)
 
-		if SelfTbl.IsAlive then
-			State:AddSuccess("Alive")
-		else
-			State:AddError("Dead")
-		end
-
-		for _, Error in pairs(SelfTbl.OverlayErrors) do
-			State:AddError(Error)
-		end
+		if SelfTbl.IsAlive then State:AddSuccess("Alive") end
 
 		State:AddWidthBreak()
 		State:AddKeyValue("Role", SelfTbl.CrewTypeID)
@@ -634,10 +650,12 @@ end
 
 -- Entity methods
 do
-	-- If the player trips a legality check (e.g. notsolid)
-	-- You can't bring back a dead crew so there is no enable...
+	-- Restrictions suspend the crew instead of killing it, efficiency recovers on the next update once enabled
 	function ENT:Disable()
-		self:KillCrew("npc/zombie/zombie_voice_idle6.wav")
+		self.TotalEff = 0
+
+		WireLib.TriggerOutput(self, "TotalEff", 0)
+		self:UpdateOverlay()
 	end
 
 	-- Fully revives a dead crew member. Called by gamemodes like AAS and by acf_supply.
@@ -647,6 +665,8 @@ do
 		self:SetMaterial(self.MaterialPath or "") -- Reset to default material
 		self:SetColor(Color(255, 255, 255, 255)) -- Reset the flesh-white tint KillCrew applies
 		self:UpdateOverlay()
+
+		ACF.RefreshCondition(self)
 	end
 
 	-- Timer only runs while the crew actually needs healing; DamageCrew re-arms it. In-combat
@@ -777,6 +797,8 @@ do
 
 		self:UpdateOverlay()
 		self:ReplaceCrew()
+
+		ACF.RefreshCondition(self)
 
 		-- TODO: CLEAN THIS UP
 		-- Check how many crew remain and kill the owner if there are none left

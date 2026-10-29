@@ -29,7 +29,8 @@ local UnlinkSound = "physics/metal/metal_box_impact_bullet%s.wav"
 
 do -- Random timer crew stuff
 	--- Whether Crew renders Turret controlled, and whether that cascades to vertical drives.
-	local function CrewGrantsControl(Turret, Crew)
+	-- HeightRef is the vertical drive the cascade would reach, used for the above-it check; defaults to Turret.
+	local function CrewGrantsControl(Turret, Crew, HeightRef)
 		if ENTITY.GetTable(Crew).TotalEff < ACF.GunnerEfficiencyThreshold then return false, false end
 
 		local CrewParent = Crew:GetParent()
@@ -50,8 +51,13 @@ do -- Random timer crew stuff
 			local CarriedMass = (Turret.TurretData.TotalMass or 0) + (Turret.ACF.Mass or 0)
 			if CarriedMass <= ACF.LightweightTurretMassLimit then return true, true end
 
-			-- Casemates traverse too little to need a dedicated gunner station, so they cascade at any mass
-			if (Turret.MaxDeg - Turret.MinDeg) <= ACF.CasemateArcLimit then return true, true end
+			-- Casemates traverse too little to need a dedicated gunner station, so they cascade at any mass,
+			-- as long as the gunner sits above the vertical drive itself rather than beside or below it
+			if (Turret.MaxDeg - Turret.MinDeg) <= ACF.CasemateArcLimit then
+				local Center = Crew:OBBCenter()
+				local CrewTop = Crew:LocalToWorld(Vector(Center.x, Center.y, Crew:OBBMaxs().z))
+				if CrewTop.z >= (HeightRef or Turret):GetPos().z then return true, true end
+			end
 
 			return true, false -- Controls, but no cascade to vertical drives
 		end
@@ -69,8 +75,9 @@ do -- Random timer crew stuff
 	end
 
 	-- Whether any Gunner/Commander/Pilot crew linked to Turret grants control, or a Lightweight
-	-- Controller does. Cascade checks the cascade-to-vertical-drives result instead of self-control
-	local function IsGrantedControl(Turret, Cascade)
+	-- Controller does. Cascade checks the cascade-to-vertical-drives result instead of self-control,
+	-- and HeightRef is the vertical drive the cascade would reach
+	local function IsGrantedControl(Turret, Cascade, HeightRef)
 		if HasActiveLightweightController(Turret) then return true end
 
 		local CrewsByType = Turret.CrewsByType
@@ -80,7 +87,7 @@ do -- Random timer crew stuff
 			for Crew in pairs(CrewsByType[CrewType] or {}) do
 				if not IsValid(Crew) then continue end
 
-				local Controls, Cascades = CrewGrantsControl(Turret, Crew)
+				local Controls, Cascades = CrewGrantsControl(Turret, Crew, HeightRef)
 				if Cascade and Cascades then return true end
 				if not Cascade and Controls then return true end
 			end
@@ -89,11 +96,42 @@ do -- Random timer crew stuff
 		return false
 	end
 
+	-- The crew linked to aim the turret, with why each one does not, for the aim control requirement.
+	-- Cascade means Turret is the ancestor horizontal drive, and we're explaining a failed cascade to a sub-turret.
+	local function GetIdleAimers(Turret, Cascade)
+		local Crews = {}
+
+		for _, CrewType in ipairs({"Gunner", "Commander", "Pilot"}) do
+			for Crew in pairs(Turret.CrewsByType[CrewType] or {}) do
+				if not IsValid(Crew) then continue end
+
+				local Reason
+
+				if ENTITY.GetTable(Crew).TotalEff < ACF.GunnerEfficiencyThreshold then
+					Reason = "Efficiency too low to aim"
+				elseif Cascade and Crew:GetParent() == Turret:GetParent() then
+					if (Turret.MaxDeg - Turret.MinDeg) > ACF.CasemateArcLimit then
+						Reason = "Turret too heavy, and its arc too wide, to cascade control from here"
+					else
+						Reason = "Top of gunner's head must be above the vertical drive to cascade control to it"
+					end
+				else
+					Reason = "Gunner must ride on the turret, or share its parent"
+				end
+
+				Crews[#Crews + 1] = { Crew = Crew, Reason = Reason }
+			end
+		end
+
+		return Crews
+	end
+
 	function ENT:UpdateControlled()
 		local SelfTbl = ENTITY.GetTable(self)
 		SelfTbl.CrewsByType = SelfTbl.CrewsByType or {}
 
 		local Controlled = IsGrantedControl(self, false)
+		local Cascade, CascadeFrom = false, self
 
 		if not Controlled and SelfTbl.Turret == "Turret-V" then
 			local Ancestor = SelfTbl.ACF_TurretAncestor
@@ -104,11 +142,18 @@ do -- Random timer crew stuff
 			end
 
 			if IsValid(Ancestor) and Ancestor.Turret == "Turret-H" then
-				Controlled = IsGrantedControl(Ancestor, true)
+				Controlled = IsGrantedControl(Ancestor, true, self)
+				Cascade, CascadeFrom = true, Ancestor
 			end
 		end
 
 		SelfTbl.IsControlled = Controlled
+
+		-- Only weaponized turrets need someone aiming them
+		local Met = Controlled or not SelfTbl.IsWeaponized or SelfTbl.IsPassthrough
+
+		self:SetRequirement("turret_aim_control", Met, not Met and { Crews = GetIdleAimers(CascadeFrom, Cascade) })
+
 		return Controlled
 	end
 end
@@ -220,6 +265,16 @@ do	-- Spawn and Update funcs
 
 	local function GetMass(Turret, Size)
 		return math_Round(math_max(Turret.Mass * (Size / Turret.Size.Base), 5) ^ 1.5, 1)
+	end
+
+	function ENT.ACF_CheckSpawnLimit(Player)
+		return Player:CheckLimit("_acf_turret")
+	end
+
+	function ENT:ACF_PostSpawn(Player)
+		if IsValid(Player) then
+			Player:AddCount("_acf_turret", self)
+		end
 	end
 
 	function ENT:ACF_PreSpawn(_, _, _, Data)
@@ -836,7 +891,7 @@ do	-- Spawn and Update funcs
 			SoundPath  = Motor.SoundPath
 			SoundPitch = Motor.SoundPitch and math_Clamp(Motor.SoundPitch * 100, 0, 255) or SoundPitch
 			SoundVolume = Motor.SoundVolume or SoundVolume
-		elseif SelfTbl.IsPassthrough then -- Set by the sound replacer tool
+		else -- Motorless drives (handcrank, servos, actuators) use their own sound, set by the sound replacer tool
 			SoundPath   = SelfTbl.CustomSound or SoundPath
 			SoundPitch  = SelfTbl.CustomPitch and math_Clamp(SelfTbl.CustomPitch * 100, 0, 255) or SoundPitch
 			SoundVolume = SelfTbl.CustomVolume or SoundVolume
@@ -1002,7 +1057,11 @@ do -- Overlay
 			State:AddProgressBar("Current Load", TotalMass, MaxMass, " kg")
 			State:AddKeyValue("Target Extension", math_Round(SelfTbl.DesiredExtension, 1) .. "/" .. math_Round(SelfTbl.Stroke, 1) .. " in")
 
-			if SelfTbl.Overloaded then State:AddError("Overloaded: can only retract") end
+			if SelfTbl.Overloaded then
+				local _, Detail = ACF.Diagnostics.Describe("actuator_overloaded")
+
+				State:AddError(Detail, "actuator_overloaded")
+			end
 		else
 			State:AddNumber("Max Rotation", SlewMax, " deg/s")
 			State:AddNumber("Accel", SlewAccel, " deg/s^2")
@@ -1020,11 +1079,7 @@ do -- Overlay
 		if not SelfTbl.IsPassthrough then -- Weapons never gate a servo or actuator
 			if SelfTbl.IsWeaponized then
 				State:AddKeyValue("Weaponized", "Yes")
-				if SelfTbl.IsControlled then
-					State:AddKeyValue("Controlled", "Yes")
-				else
-					State:AddError("Uncontrolled: not aiming")
-				end
+				State:AddKeyValue("Controlled", SelfTbl.IsControlled and "Yes" or "No")
 			else
 				State:AddKeyValue("Weaponized", "No")
 			end
@@ -1048,8 +1103,8 @@ end
 
 do -- Metamethods
 	do	-- Links
-		ACF.RegisterLinkSource("acf_turret", "Motors")
-		ACF.RegisterLinkSource("acf_turret", "Gyros")
+		ACF.RegisterLinkSource("acf_turret", "Motor", true)
+		ACF.RegisterLinkSource("acf_turret", "Gyro", true)
 
 		-- Motor links
 
@@ -1062,6 +1117,8 @@ do -- Metamethods
 
 			This.Motor		= Motor
 			Motor.Turret	= This
+
+			ACF.Hints.Set(Motor, "turret_motor_no_drive", false)
 
 			Motor:ValidatePlacement()
 			This:UpdateTurretSlew()
@@ -1079,6 +1136,8 @@ do -- Metamethods
 
 			This.Motor		= nil
 			Motor.Turret	= nil
+
+			ACF.Hints.Set(Motor, "turret_motor_no_drive", true)
 
 			Motor:ValidatePlacement()
 			This:UpdateTurretSlew()
@@ -1108,6 +1167,7 @@ do -- Metamethods
 
 			This.Gyro	= Gyro
 
+			Gyro:UpdateLinkHints()
 			This:UpdateTurretSlew()
 
 			This:UpdateOverlay(true)
@@ -1133,6 +1193,7 @@ do -- Metamethods
 
 			This.Gyro	= nil
 
+			Gyro:UpdateLinkHints()
 			This:UpdateTurretSlew()
 
 			This:UpdateOverlay(true)
@@ -1155,6 +1216,10 @@ do -- Metamethods
 				duplicator.StoreEntityModifier(self, "ACFGyro", {SelfTbl.Gyro:EntIndex()})
 			end
 
+			if IsValid(SelfTbl.Radar) then
+				duplicator.StoreEntityModifier(self, "ACFRadar", {SelfTbl.Radar:EntIndex()})
+			end
+
 			-- Stored turret-side since the controller's periodic link Check would otherwise
 			-- gate the very first paste-time relink before contraption/mass data has settled
 			if SelfTbl.LightweightControllers and next(SelfTbl.LightweightControllers) then
@@ -1166,12 +1231,9 @@ do -- Metamethods
 					duplicator.StoreEntityModifier(self, "ACFLightweightControllers", Indices)
 				end
 			end
-
-			-- Wire dupe info
-			self.BaseClass.PreEntityCopy(self)
 		end
 
-		function ENT:PostEntityPaste(Player, Ent, CreatedEntities)
+		function ENT:PostEntityPaste(_, Ent, CreatedEntities)
 			local EntMods = Ent.EntityMods
 
 			if EntMods.ACFMotor then
@@ -1186,6 +1248,12 @@ do -- Metamethods
 				EntMods.ACFGyro = nil
 			end
 
+			if EntMods.ACFRadar then
+				self:Link(CreatedEntities[EntMods.ACFRadar[1]])
+
+				EntMods.ACFRadar = nil
+			end
+
 			if EntMods.ACFLightweightControllers then
 				for _, Index in ipairs(EntMods.ACFLightweightControllers) do
 					local Controller = CreatedEntities[Index]
@@ -1194,8 +1262,6 @@ do -- Metamethods
 
 				EntMods.ACFLightweightControllers = nil
 			end
-
-			self.BaseClass.PostEntityPaste(self, Player, Ent, CreatedEntities)
 		end
 	end
 
