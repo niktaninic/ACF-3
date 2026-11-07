@@ -271,12 +271,6 @@ do	-- Spawn and Update funcs
 		return Player:CheckLimit("_acf_turret")
 	end
 
-	function ENT:ACF_PostSpawn(Player)
-		if IsValid(Player) then
-			Player:AddCount("_acf_turret", self)
-		end
-	end
-
 	function ENT:ACF_PreSpawn(_, _, _, Data)
 		self.ACF = {}
 
@@ -1397,8 +1391,13 @@ do -- Metamethods
 			local FinalAccel	= math_Clamp(TargetBearing, -MaxImpulse, MaxImpulse)
 			local BrakingDist	= SelfTbl.SlewRate ^ 2 / math_abs(FinalAccel) / 2
 
+			-- SlewRate is world-frame but SlewMax is the motor's local limit; when the mount turns
+			-- the way we're slewing, FeedFwd eats into the motor's speed unless SlewRate may exceed it
+			local SlewLow	= -SlewMax - math_max(FeedFwd, 0)
+			local SlewHigh	= SlewMax - math_min(FeedFwd, 0)
+
 			if SelfTbl.Active then
-				SelfTbl.SlewRate = math_Clamp(SelfTbl.SlewRate + (math_abs(FinalAccel) * ((Dist + (SelfTbl.SlewRate * 2 * -Sign)) >= BrakingDist and Sign or -Sign)), -SlewMax, SlewMax)
+				SelfTbl.SlewRate = math_Clamp(SelfTbl.SlewRate + (math_abs(FinalAccel) * ((Dist + (SelfTbl.SlewRate * 2 * -Sign)) >= BrakingDist and Sign or -Sign)), SlewLow, SlewHigh)
 
 				if SelfTbl.SlewRate ~= 0 and (Dist <= math_abs(FinalAccel)) and (SelfTbl.SlewRate <= FinalAccel) then
 					SelfTbl.SlewRate = 0
